@@ -1,0 +1,7 @@
+El archivo charts.csv no está en el repositorio por su tamaño (3.48 GB).
+
+Descargarlo de:
+https://www.kaggle.com/datasets/dhruvildave/spotify-charts
+
+Una vez descargado, colocarlo en esta carpeta como:
+datasets/charts.csv
