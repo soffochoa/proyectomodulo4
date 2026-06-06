@@ -1,8 +1,8 @@
 -- =============================================================================
 -- Poblar dim_fecha — rango completo del dataset (2017-01-01 a 2021-12-31)
 -- =============================================================================
--- Se genera con generate_series: no depende del CSV, es puramente matemático.
--- Cubre exactamente el rango del dataset de Spotify Charts de Kaggle.
+-- Genero esta tabla con generate_series: no depende del CSV, es puro cálculo.
+-- Cubre exactamente el rango del dataset de Spotify Charts (Kaggle).
 -- =============================================================================
 
 SET search_path TO proyecto_spotify;
@@ -35,15 +35,16 @@ FROM generate_series(
     '2021-12-31'::DATE,
     '1 day'::INTERVAL
 ) AS d
-ON CONFLICT (fecha_key) DO NOTHING;   -- idempotente: re-correr no duplica
+ON CONFLICT (fecha_key) DO NOTHING;   -- idempotente: re-ejecutar no duplica
 
 
 -- =============================================================================
 -- VERIFICACIÓN
 -- =============================================================================
+-- Comprueba que la tabla quedó con todas las fechas esperadas
  SELECT COUNT(*) FROM proyecto_spotify.dim_fecha;
- --Esperado: 1826 filas (5 años, 2020 bisiesto)
+ -- Esperado: 1826 filas (5 años, 2020 bisiesto)
 
  SELECT anio, COUNT(*) FROM proyecto_spotify.dim_fecha GROUP BY anio ORDER BY anio;
- --Esperado: 365, 365, 365, 366, 365
+ -- Esperado: 365, 365, 365, 366, 365
 -- =============================================================================

@@ -1,19 +1,19 @@
 -- Queries analíticas — Spotify Charts: México vs el mundo (2017-2021)
 --
--- Cinco queries que usan las técnicas de SQL avanzado del módulo:
---   1. CTE + RANK()          → top 10 artistas por streams en México vs Global
---   2. CTE + LAG()           → evolución trimestral de streams en México
---   3. ROW_NUMBER() rachas   → artistas con más semanas consecutivas en Top 10
---   4. PERCENTILE_CONT       → distribución de streams por año
---   5. CTEs dobles + antipattern → artistas locales invisibles globalmente
+-- Archivo con cinco queries que escribí usando técnicas vistas en clase:
+--  1) CTE + RANK()          -> Top 10 artistas por streams (México vs Global)
+--  2) CTE + LAG()           -> Evolución trimestral de streams en México
+--  3) ROW_NUMBER() rachas   -> Artistas con más semanas consecutivas en Top 10
+--  4) PERCENTILE_CONT       -> Distribución de streams por año
+--  5) CTEs dobles + LEFT/IS NULL -> Artistas populares en México pero no en global
 
 SET search_path TO proyecto_spotify;
 
 
 -- -----------------------------------------------------------------------------
 -- Query 1 — Top 10 artistas por streams en México vs Global
--- uso una CTE para calcular los totales primero y luego aplico RANK()
--- para no tener que hacer un subquery anidado feo
+-- Uso una CTE para calcular los totales por artista y luego aplico RANK().
+-- Evito hacer subqueries anidados raros.
 -- -----------------------------------------------------------------------------
 
 WITH streams_por_artista AS (
@@ -27,7 +27,7 @@ WITH streams_por_artista AS (
     JOIN      dim_region         dr  USING (region_key)
     WHERE     fce.chart_key = 1                    -- solo top200 porque viral50 no tiene streams
       AND     fce.streams IS NOT NULL
-      AND     (dr.es_mexico OR dr.es_global)       -- filtro los dos que me interesan
+      AND     (dr.es_mexico OR dr.es_global)       -- filtro las dos regiones que me interesan
     GROUP BY  dr.region, dc.artista
 ),
 ranking AS (
@@ -37,7 +37,7 @@ ranking AS (
         streams_totales,
         dias_en_chart,
         RANK() OVER (
-            PARTITION BY region          -- ranking independiente por región
+            PARTITION BY region          -- ranking por región
             ORDER BY streams_totales DESC
         ) AS posicion
     FROM streams_por_artista
@@ -50,7 +50,7 @@ ORDER  BY region DESC, posicion;
 
 -- -----------------------------------------------------------------------------
 -- Query 2 — Evolución trimestral de streams en México con % de cambio
--- LAG() me da el valor del trimestre anterior para calcular el delta
+-- Uso LAG() para traer el valor del trimestre anterior y calcular el delta.
 -- -----------------------------------------------------------------------------
 
 WITH trimestral AS (
@@ -83,7 +83,7 @@ SELECT
         100.0 * (streams_totales - LAG(streams_totales) OVER (ORDER BY anio, trimestre))
         / NULLIF(LAG(streams_totales) OVER (ORDER BY anio, trimestre), 0),
         1
-    )                               AS pct_cambio    -- NULLIF evita división entre cero
+    )                               AS pct_cambio    -- NULLIF evita div/0
 FROM  trimestral
 ORDER BY anio, trimestre;
 
@@ -91,13 +91,12 @@ ORDER BY anio, trimestre;
 -- -----------------------------------------------------------------------------
 -- Query 3 — Artistas con más semanas consecutivas en el Top 10 de México
 --
--- la técnica para detectar rachas es: semana - ROW_NUMBER() = constante
--- dentro de una racha continua del mismo artista
--- es un truco clásico que vimos en clase y aquí tiene mucho sentido usarlo
+-- Técnica: semana - ROW_NUMBER() da una constante dentro de una racha.
+-- Cuando ese valor cambia, la racha se interrumpe.
 -- -----------------------------------------------------------------------------
 
 WITH semanas_top10 AS (
-    -- primero saco una fila por artista+semana si estuvo en top 10 esa semana
+    -- Primero saco una fila por artista+semana si estuvo en top 10 esa semana
     SELECT
         dc.artista,
         df.anio,
@@ -145,8 +144,8 @@ LIMIT  15;
 
 -- -----------------------------------------------------------------------------
 -- Query 4 — Distribución de streams por año en México
--- PERCENTILE_CONT me da la mediana y el percentil 95
--- sirve para ver si el "piso" de streams para entrar al chart creció con los años
+-- Uso PERCENTILE_CONT para sacar la mediana y el percentil 95.
+-- Sirve para ver si el 'piso' de streams para entrar al chart subió con los años.
 -- -----------------------------------------------------------------------------
 
 SELECT
@@ -169,14 +168,14 @@ ORDER BY  df.anio;
 -- -----------------------------------------------------------------------------
 -- Query 5 — Artistas populares en México pero invisibles globalmente
 --
--- esta es la query central del proyecto — responde directamente la pregunta analítica
--- uso dos CTEs y un LEFT JOIN con IS NULL (antipattern) para encontrar
--- artistas que están en México pero nunca aparecieron en el chart global
+-- Esta es la query central del proyecto: responde la pregunta analítica.
+-- Uso dos CTEs y un LEFT JOIN + IS NULL para encontrar artistas que están
+-- en México pero no aparecieron en el chart global (sé que tiene sus límites).
 -- -----------------------------------------------------------------------------
 
 WITH artistas_mexico AS (
-    -- artistas con presencia real en México (mínimo 30 entradas para filtrar los que
-    -- aparecieron un día y desaparecieron)
+    -- artistas con presencia real en México (>=30 entradas para filtrar los que
+    -- solo aparecieron un día)
     SELECT
         dc.artista,
         COUNT(*)         AS entradas_mx,

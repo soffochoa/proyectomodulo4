@@ -1,22 +1,25 @@
 """
 Dashboard — Spotify Charts: México vs el mundo (2017-2021)
 
-Genera 4 visualizaciones estáticas (PNG) a partir de queries contra Aurora
-PostgreSQL. Requiere que el ETL ya haya cargado los datos.
+Genero 4 gráficos PNG usando consultas a Aurora PostgreSQL. Ejecuta esto
+después de que el ETL haya cargado los datos.
 
-Uso:
-    export AURORA_HOST=aurora-mod4.cluster-XXX.us-east-1.rds.amazonaws.com
-    export AURORA_PASSWORD=tu_password
-    python dashboard/dashboard.py
+Cómo usar:
+        export AURORA_HOST=aurora-mod4.cluster-XXX.us-east-1.rds.amazonaws.com
+        export AURORA_PASSWORD=tu_password
+        python dashboard/dashboard.py
 
-    O bien con argumentos directos:
-    python dashboard/dashboard.py \\
-        --host     aurora-mod4.cluster-XXX.us-east-1.rds.amazonaws.com \\
-        --password TU_PASSWORD \\
-        --database northwind
+O con argumentos:
+        python dashboard/dashboard.py \\
+                --host     aurora-mod4.cluster-XXX.us-east-1.rds.amazonaws.com \\
+                --password TU_PASSWORD \\
+                --database northwind
 
-Salida: dashboard/img/{01_top_artistas, 02_evolucion_trimestral,
-                        03_artistas_locales, 04_streams_por_anio}.png
+Salida: los PNG en `dashboard/img/`:
+    01_top_artistas.png
+    02_evolucion_trimestral.png
+    03_artistas_locales.png
+    04_streams_por_anio.png
 """
 
 import argparse
@@ -46,7 +49,7 @@ def conectar(host: str, password: str, database: str, port: int = 5432):
         f"postgresql+psycopg2://postgres:{password}@{host}:{port}/{database}",
         pool_pre_ping=True,
     )
-    # Verificar conexión antes de continuar
+    # Compruebo la conexión para fallar rápido si algo anda mal
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     logger.info("Conexión a Aurora establecida correctamente")
@@ -58,7 +61,9 @@ def conectar(host: str, password: str, database: str, port: int = 5432):
 # =============================================================================
 
 def query_top_artistas(engine) -> pd.DataFrame:
-    """Top 10 artistas por streams totales en México y Global."""
+    """Devuelvo un DataFrame con el top 10 de artistas por streams totales
+    en México y en el chart Global. 
+    """
     return pd.read_sql(text("""
         WITH streams_por_artista AS (
             SELECT
@@ -89,7 +94,9 @@ def query_top_artistas(engine) -> pd.DataFrame:
 
 
 def query_evolucion_trimestral(engine) -> pd.DataFrame:
-    """Evolución trimestral de streams en México con delta respecto al trimestre anterior."""
+    """Devuelvo la evolución trimestral de streams en México.
+    Incluyo el % de cambio respecto al trimestre anterior.
+    """
     return pd.read_sql(text("""
         WITH trimestral AS (
             SELECT
@@ -119,7 +126,9 @@ def query_evolucion_trimestral(engine) -> pd.DataFrame:
 
 
 def query_artistas_locales(engine) -> pd.DataFrame:
-    """Top 20 artistas con presencia en México pero invisibles globalmente."""
+    """Top 20 artistas que aparecen mucho en México pero no en el chart global.
+    Me sirve para detectar artistas "locales".
+    """
     return pd.read_sql(text("""
         WITH artistas_mexico AS (
             SELECT
@@ -153,7 +162,9 @@ def query_artistas_locales(engine) -> pd.DataFrame:
 
 
 def query_streams_por_anio(engine) -> pd.DataFrame:
-    """Distribución de streams por año en México (mediana y percentil 95)."""
+    """Saco estadísticas por año: mediana, P95, promedio y máximo de streams
+    para entradas del chart en México.
+    """
     return pd.read_sql(text("""
         SELECT
             df.anio,
@@ -180,7 +191,7 @@ def query_streams_por_anio(engine) -> pd.DataFrame:
 def viz_top_artistas(df: pd.DataFrame):
     """
     Viz 1 — Top 10 artistas por streams totales: México vs Global
-    Responde: ¿Quién domina en México comparado con el chart global?
+    Grafica los 10 mejores por región para comparar.
     """
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
     fig.suptitle(
@@ -188,7 +199,7 @@ def viz_top_artistas(df: pd.DataFrame):
         fontsize=14, fontweight="bold", y=1.01,
     )
 
-    regiones = [("Mexico", axes[0], "#1DB954"), ("global", axes[1], "#191414")]
+    regiones = [("Mexico", axes[0], "#1DB954"), ("Global", axes[1], "#191414")]
     for region, ax, color in regiones:
         sub = df[df["region"] == region].sort_values("streams_totales")
         bars = ax.barh(
@@ -198,9 +209,10 @@ def viz_top_artistas(df: pd.DataFrame):
         ax.set_xlabel("Streams totales (miles de millones)")
         ax.set_title(f"{'México 🇲🇽' if region == 'Mexico' else 'Global 🌍'}", fontsize=13)
         ax.grid(True, axis="x", alpha=0.3)
-        for bar, val in zip(bars, sub["streams_totales"] / 1e9):
-            ax.text(val + 0.01, bar.get_y() + bar.get_height() / 2,
-                    f"{val:.2f}B", va="center", fontsize=8)
+    for bar, val in zip(bars, sub["streams_totales"] / 1e9):
+        # Etiqueta simple al final de cada barra con valor en miles de millones
+        ax.text(val + 0.01, bar.get_y() + bar.get_height() / 2,
+            f"{val:.2f}B", va="center", fontsize=8)
 
     plt.tight_layout()
     plt.savefig(OUT / "01_top_artistas.png", dpi=110, bbox_inches="tight")
@@ -211,20 +223,20 @@ def viz_top_artistas(df: pd.DataFrame):
 def viz_evolucion_trimestral(df: pd.DataFrame):
     """
     Viz 2 — Evolución trimestral de streams en México
-    Responde: ¿Cómo creció el consumo musical en México año a año?
+    Combina barras (streams) y línea (% cambio).
     """
     fig, ax1 = plt.subplots(figsize=(13, 6))
 
     etiquetas = [f"{r.anio}-Q{r.trimestre}" for _, r in df.iterrows()]
     x = range(len(etiquetas))
 
-    # Barras: streams totales
+    # Dibujo de barras: streams totales
     bars = ax1.bar(x, df["streams_totales"] / 1e9, color="#1DB954",
                    edgecolor="black", linewidth=0.5, alpha=0.8, label="Streams (miles de millones)")
     ax1.set_ylabel("Streams totales (miles de millones)", color="#1DB954")
     ax1.tick_params(axis="y", labelcolor="#1DB954")
 
-    # Línea: % cambio trimestral
+    # Línea: % de cambio respecto al trimestre anterior
     ax2 = ax1.twinx()
     pct = df["pct_cambio"].fillna(0)
     ax2.plot(x, pct, color="#E91429", marker="o", linewidth=2,
@@ -254,7 +266,7 @@ def viz_evolucion_trimestral(df: pd.DataFrame):
 def viz_artistas_locales(df: pd.DataFrame):
     """
     Viz 3 — Artistas locales invisibles globalmente
-    Responde: ¿Quiénes son populares en México pero ausentes del chart global?
+    Muestra top 15 locales (por streams) y su mejor rank.
     """
     top15 = df.head(15).sort_values("streams_mx")
 
@@ -272,6 +284,7 @@ def viz_artistas_locales(df: pd.DataFrame):
     ax.grid(True, axis="x", alpha=0.3)
 
     for bar, row in zip(bars, top15.itertuples()):
+        # Anotación sencilla con millones y mejor posición alcanzada
         ax.text(
             bar.get_width() + 1, bar.get_y() + bar.get_height() / 2,
             f"{row.streams_mx / 1e6:.0f}M  (rank #{row.mejor_rank_mx})",
@@ -287,7 +300,7 @@ def viz_artistas_locales(df: pd.DataFrame):
 def viz_streams_por_anio(df: pd.DataFrame):
     """
     Viz 4 — Distribución de streams por año en México (mediana y P95)
-    Responde: ¿Creció el "piso" de streams necesario para entrar al chart?
+    Compara mediana, P95 y promedio por año.
     """
     x = df["anio"].astype(str)
     x_pos = range(len(x))
@@ -336,6 +349,7 @@ def main():
     args = parser.parse_args()
 
     if not args.host or not args.password:
+        # Mensaje para el que use este script: necesita host y password
         print(
             "ERROR: Debes proporcionar --host y --password, "
             "o definir AURORA_HOST y AURORA_PASSWORD como variables de entorno."

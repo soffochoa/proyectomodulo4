@@ -1,14 +1,14 @@
 -- dim_region — insertar todas las regiones del dataset
 --
--- saqué esta lista revisando los valores únicos de la columna "region" del CSV
--- son 69 regiones en total contando "global"
--- los flags es_global y es_mexico los puse para no tener que escribir
--- WHERE region = 'Mexico' o WHERE region = 'global' en cada query
+-- Saqué esta lista revisando los valores únicos de la columna "region" del CSV.
+-- Son 69 regiones en total (incluyendo "Global").
+-- Pongo los flags es_global y es_mexico para poder filtrar fácil
+-- sin escribir literales en cada consulta.
 
 SET search_path TO proyecto_spotify;
 
 INSERT INTO dim_region (region, es_global, es_mexico) VALUES
-    ('global',              TRUE,  FALSE),
+    ('Global',              TRUE,  FALSE),
     ('Mexico',              FALSE, TRUE),
     ('Argentina',           FALSE, FALSE),
     ('Australia',           FALSE, FALSE),
@@ -77,12 +77,9 @@ INSERT INTO dim_region (region, es_global, es_mexico) VALUES
     ('United States',       FALSE, FALSE),
     ('Uruguay',             FALSE, FALSE),
     ('Vietnam',             FALSE, FALSE)
-ON CONFLICT (region) DO NOTHING;  -- idempotente, se puede re-correr sin problema
+ON CONFLICT (region) DO NOTHING;  -- idempotente: re-ejecutar no duplica
 
 
--- para verificar:
--- SELECT COUNT(*) FROM proyecto_spotify.dim_region;
--- debería dar 69
---
--- SELECT region FROM proyecto_spotify.dim_region WHERE es_global OR es_mexico;
--- debería mostrar solo 'global' y 'Mexico'
+-- VERIFICACIÓN (ejemplos)
+-- SELECT COUNT(*) FROM proyecto_spotify.dim_region;  -- debería devolver 69
+-- SELECT region FROM proyecto_spotify.dim_region WHERE es_global OR es_mexico;  -- solo 'Global' y 'Mexico'

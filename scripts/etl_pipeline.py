@@ -2,10 +2,10 @@
 """
 ETL Pipeline — Spotify Charts: México vs el mundo (2017-2021)
 
-Lee el charts.csv de Kaggle, lo transforma al modelo dimensional
-y lo carga a Aurora PostgreSQL en el schema proyecto_spotify.
+Leo el charts.csv de Kaggle, lo transformo al modelo dimensional
+y lo cargo a Aurora PostgreSQL en el schema proyecto_spotify.
 
-Antes de correr este script hay que haber ejecutado los 4 SQLs:
+Antes de ejecutar esto debes haber corrido los 4 SQLs:
     01_schema_ddl.sql
     02_dim_fecha_populate.sql
     03_dim_region_populate.sql
@@ -18,8 +18,8 @@ Cómo correrlo:
         --database northwind \\
         --csv      datasets/charts.csv
 
-El script es idempotente: si se re-corre trunca las tablas antes de volver
-a cargar, así no quedan datos duplicados.
+El script es idempotente: si lo vuelvo a ejecutar trunca las tablas antes
+de cargar de nuevo para evitar duplicados.
 """
 
 import argparse
@@ -46,8 +46,8 @@ CHART_KEY_MAP = {"top200": 1, "viral50": 2}
 
 def extract(csv_path: str) -> pd.io.parsers.TextFileReader:
     """
-    Abre el CSV como un iterador de chunks.
-    No carga todo en memoria porque el archivo pesa 3.48 GB.
+    Abro el CSV como un iterador de chunks.
+    No cargo todo en memoria porque el archivo pesa ~3.5 GB.
     """
     path = Path(csv_path)
     if not path.exists():
@@ -79,16 +79,16 @@ def extract(csv_path: str) -> pd.io.parsers.TextFileReader:
 # =============================================================================
 
 def transform(chunk: pd.DataFrame) -> pd.DataFrame:
-    """
-    Limpia y transforma un chunk del CSV crudo al formato que necesita la fact.
+        """
+        Limpio y transformo un chunk del CSV al formato que necesita la fact.
 
-    Lo que hace:
-      1. Renombrar columnas al nombre que uso en el modelo
-      2. Calcular fecha_key como YYYYMMDD entero para hacer join con dim_fecha
-      3. Convertir nombre del chart a su clave numérica
-      4. Descartar filas con datos inválidos o fuera de rango
-      5. Truncar strings por si alguno viene más largo de lo esperado
-    """
+        Hago:
+            1. Renombrar columnas a los nombres del modelo
+            2. Calcular fecha_key como YYYYMMDD entero para el join con dim_fecha
+            3. Mapear el nombre del chart a su clave numérica
+            4. Filtrar filas inválidas o fuera de rango
+            5. Truncar strings que vengan demasiado largos
+        """
     df = chunk.copy()
 
     df = df.rename(columns={
@@ -125,9 +125,9 @@ def transform(chunk: pd.DataFrame) -> pd.DataFrame:
 
 def upsert_canciones(df: pd.DataFrame, engine, cancion_map: dict) -> None:
     """
-    Inserta canciones nuevas y actualiza el mapa.
-    Usa una clave compuesta titulo|artista para vectorizar el filtro
-    en lugar de apply fila por fila — mucho más rápido con chunks grandes.
+    Inserto canciones nuevas y actualizo el mapa de (titulo, artista) -> cancion_key.
+    Creo una clave compuesta titulo|artista para vectorizar el filtro en vez de usar
+    apply fila por fila — así es mucho más rápido con chunks grandes.
     """
     canciones = (
         df[["titulo", "artista", "url_spotify"]]
@@ -135,7 +135,7 @@ def upsert_canciones(df: pd.DataFrame, engine, cancion_map: dict) -> None:
         .copy()
     )
 
-    # clave compuesta para vectorizar el filtro con isin — evita apply fila por fila
+    # Creo clave compuesta para vectorizar el filtro y evitar apply fila por fila
     canciones["_key"] = canciones["titulo"] + "|||" + canciones["artista"]
     keys_conocidas    = set(cancion_map.keys())
 
@@ -146,7 +146,7 @@ def upsert_canciones(df: pd.DataFrame, engine, cancion_map: dict) -> None:
     if nuevas.empty:
         return
 
-    # RETURNING devuelve las keys directo del INSERT sin un SELECT aparte
+    # RETURNING me devuelve las cancion_key directamente del INSERT sin un SELECT
     with engine.begin() as conn:
         result = conn.execute(text("""
             INSERT INTO proyecto_spotify.dim_cancion (titulo, artista, url_spotify)
@@ -167,9 +167,9 @@ def upsert_canciones(df: pd.DataFrame, engine, cancion_map: dict) -> None:
 
 def load_fact(df_fact: pd.DataFrame, engine):
     """
-    Carga el chunk a fact_chart_entry usando COPY.
-    Es el método estándar para cargas masivas en PostgreSQL — manda todos
-    los datos en un solo comando en lugar de hacer INSERTs por lotes.
+    Cargo el chunk a fact_chart_entry usando COPY.
+    Es el método estándar para cargas masivas en PostgreSQL: manda todos los
+    datos en un solo comando en lugar de muchos INSERTs.
     """
     buffer = io.StringIO()
     df_fact.to_csv(buffer, index=False, header=False, na_rep="")
@@ -191,8 +191,8 @@ def load_fact(df_fact: pd.DataFrame, engine):
 
 def validate(engine):
     """
-    Validaciones básicas después de cargar todo.
-    Si algo está mal el script falla aquí con un mensaje claro.
+    Hago validaciones básicas después de la carga.
+    Si detecto algo mal, lanzo un error con un mensaje claro.
     """
     logger.info("Ejecutando validaciones post-carga...")
 
