@@ -23,6 +23,7 @@ a cargar, así no quedan datos duplicados.
 """
 
 import argparse
+import io
 import logging
 import sys
 from pathlib import Path
@@ -33,18 +34,9 @@ from tqdm import tqdm
 
 logger = logging.getLogger("etl_spotify")
 
-# =============================================================================
-# Configuración
-# =============================================================================
-
-SCHEMA       = "proyecto_spotify"
-CHUNKSIZE    = 50_000      # proceso el CSV en bloques de 50k filas para no cargar 3.48 GB en RAM de un jalón
-CSV_ENCODING = "utf-8"
-
-# columnas que tiene el CSV de Kaggle
-CSV_COLUMNS = ["title", "rank", "date", "artist", "url", "region", "chart", "trend", "streams"]
-
-# mapa para convertir el nombre del chart a su clave numérica, tiene que coincidir con dim_chart
+SCHEMA        = "proyecto_spotify"
+CHUNKSIZE     = 50_000
+CSV_ENCODING  = "utf-8"
 CHART_KEY_MAP = {"top200": 1, "viral50": 2}
 
 
@@ -63,7 +55,7 @@ def extract(csv_path: str) -> pd.io.parsers.TextFileReader:
 
     logger.info("Abriendo CSV en modo chunk: %s", csv_path)
 
-    reader = pd.read_csv(
+    return pd.read_csv(
         path,
         chunksize=CHUNKSIZE,
         encoding=CSV_ENCODING,
@@ -76,11 +68,10 @@ def extract(csv_path: str) -> pd.io.parsers.TextFileReader:
             "region":  str,
             "chart":   str,
             "trend":   str,
-            "streams": "Int64",   # Int64 nullable porque viral50 no tiene streams
+            "streams": "Int64",
         },
-        on_bad_lines="warn",  # si hay líneas malformadas las ignora y avisa en lugar de tronar
+        on_bad_lines="warn",
     )
-    return reader
 
 
 # =============================================================================
@@ -100,7 +91,6 @@ def transform(chunk: pd.DataFrame) -> pd.DataFrame:
     """
     df = chunk.copy()
 
-    # 1. Renombrar columnas al convenio del modelo
     df = df.rename(columns={
         "title":   "titulo",
         "artist":  "artista",
@@ -113,78 +103,86 @@ def transform(chunk: pd.DataFrame) -> pd.DataFrame:
         "date":    "fecha",
     })
 
-    # 2. Calcular fecha_key — tiene que ser YYYYMMDD como entero para hacer join con dim_fecha
-    df["fecha_key"] = (
-        df["fecha"]
-        .dt.strftime("%Y%m%d")
-        .astype("Int32")
-    )
-
-    # 3. Convertir nombre del chart a clave numérica y descartar filas con chart desconocido
+    df["fecha_key"] = df["fecha"].dt.strftime("%Y%m%d").astype("Int32")
     df["chart_key"] = df["chart_nombre"].map(CHART_KEY_MAP).astype("Int8")
     df = df.dropna(subset=["chart_key", "fecha_key", "titulo", "artista", "region"])
-
-    # 4. Ranks fuera de rango no tienen sentido, los descarto
     df = df[df["rank"].between(1, 200)]
 
-    # 5. Trunco strings por seguridad, el CSV a veces trae valores raros
     df["titulo"]      = df["titulo"].str.strip().str[:500]
     df["artista"]     = df["artista"].str.strip().str[:500]
     df["url_spotify"] = df["url_spotify"].str.strip().str[:200]
     df["region"]      = df["region"].str.strip()
     df["trend"]       = df["trend"].str.strip().str[:15]
 
-    return df[[
-        "titulo", "artista", "url_spotify",   # para dim_cancion
-        "region", "chart_key", "fecha_key",   # FKs de la fact
-        "rank", "streams", "trend",           # medidas
-    ]]
+    return df[["titulo", "artista", "url_spotify",
+               "region", "chart_key", "fecha_key",
+               "rank", "streams", "trend"]]
 
 
 # =============================================================================
 # Load helpers
 # =============================================================================
 
-def upsert_canciones(df: pd.DataFrame, engine) -> dict:
+def upsert_canciones(df: pd.DataFrame, engine, cancion_map: dict) -> None:
     """
-    Inserta canciones nuevas en dim_cancion ignorando las que ya existen.
-    Devuelve un diccionario {(titulo, artista): cancion_key} para resolver FKs.
+    Inserta canciones nuevas y actualiza el mapa.
+    Usa una clave compuesta titulo|artista para vectorizar el filtro
+    en lugar de apply fila por fila — mucho más rápido con chunks grandes.
     """
     canciones = (
         df[["titulo", "artista", "url_spotify"]]
         .drop_duplicates(subset=["titulo", "artista"])
+        .copy()
     )
 
-    # inserto de una en una con ON CONFLICT DO NOTHING para no duplicar si se re-corre
+    # clave compuesta para vectorizar el filtro con isin — evita apply fila por fila
+    canciones["_key"] = canciones["titulo"] + "|||" + canciones["artista"]
+    keys_conocidas    = set(cancion_map.keys())
+
+    nuevas = canciones[
+        ~canciones["_key"].apply(lambda k: tuple(k.split("|||")) in keys_conocidas)
+    ].drop(columns=["_key"])
+
+    if nuevas.empty:
+        return
+
+    # RETURNING devuelve las keys directo del INSERT sin un SELECT aparte
     with engine.begin() as conn:
-        for _, row in canciones.iterrows():
-            conn.execute(text("""
-                INSERT INTO proyecto_spotify.dim_cancion (titulo, artista, url_spotify)
-                VALUES (:titulo, :artista, :url)
-                ON CONFLICT (titulo, artista) DO NOTHING
-            """), {"titulo": row["titulo"], "artista": row["artista"], "url": row["url_spotify"]})
-
-    # leo el mapa completo actualizado para tener los cancion_key correctos
-    with engine.connect() as conn:
-        result = conn.execute(text(
-            "SELECT cancion_key, titulo, artista FROM proyecto_spotify.dim_cancion"
-        ))
-        mapa = {(r.titulo, r.artista): r.cancion_key for r in result}
-
-    return mapa
+        result = conn.execute(text("""
+            INSERT INTO proyecto_spotify.dim_cancion (titulo, artista, url_spotify)
+            SELECT UNNEST(CAST(:titulos AS text[])),
+                   UNNEST(CAST(:artistas AS text[])),
+                   UNNEST(CAST(:urls AS text[]))
+            ON CONFLICT (titulo, artista) DO UPDATE
+                SET url_spotify = EXCLUDED.url_spotify
+            RETURNING cancion_key, titulo, artista
+        """), {
+            "titulos":  nuevas["titulo"].tolist(),
+            "artistas": nuevas["artista"].tolist(),
+            "urls":     nuevas["url_spotify"].tolist(),
+        })
+        for r in result:
+            cancion_map[(r.titulo, r.artista)] = r.cancion_key
 
 
 def load_fact(df_fact: pd.DataFrame, engine):
-    """Carga el chunk procesado a fact_chart_entry."""
-    df_fact.to_sql(
-        "fact_chart_entry",
-        engine,
-        schema=SCHEMA,
-        if_exists="append",
-        index=False,
-        method="multi",
-        chunksize=5_000,
-    )
+    """
+    Carga el chunk a fact_chart_entry usando COPY.
+    Es el método estándar para cargas masivas en PostgreSQL — manda todos
+    los datos en un solo comando en lugar de hacer INSERTs por lotes.
+    """
+    buffer = io.StringIO()
+    df_fact.to_csv(buffer, index=False, header=False, na_rep="")
+    buffer.seek(0)
+
+    with engine.begin() as conn:
+        dbapi_conn = conn.connection
+        with dbapi_conn.cursor() as cur:
+            cur.copy_expert("""
+                COPY proyecto_spotify.fact_chart_entry
+                    (fecha_key, cancion_key, region_key, chart_key, rank, streams, trend)
+                FROM STDIN WITH (FORMAT CSV, NULL '')
+            """, buffer)
 
 
 # =============================================================================
@@ -200,7 +198,6 @@ def validate(engine):
 
     with engine.connect() as conn:
 
-        # conteo general de lo que quedó en cada tabla
         totales = conn.execute(text("""
             SELECT
                 (SELECT COUNT(*) FROM proyecto_spotify.dim_cancion)      AS canciones,
@@ -214,7 +211,6 @@ def validate(engine):
             f"{totales.entradas_fact:,}",
         )
 
-        # verifico que México y Global tienen datos, si no hay algo salió mal
         mx_global = conn.execute(text("""
             SELECT dr.region, COUNT(*) AS entradas
             FROM   proyecto_spotify.fact_chart_entry fce
@@ -225,21 +221,17 @@ def validate(engine):
         for row in mx_global:
             logger.info("  %s → %s entradas", row.region, f"{row.entradas:,}")
 
-        # no debería haber ranks fuera de rango después del transform
         rank_invalido = conn.execute(text("""
-            SELECT COUNT(*) AS n
-            FROM   proyecto_spotify.fact_chart_entry
-            WHERE  rank < 1 OR rank > 200
+            SELECT COUNT(*) FROM proyecto_spotify.fact_chart_entry
+            WHERE rank < 1 OR rank > 200
         """)).scalar()
         assert rank_invalido == 0, f"Hay {rank_invalido} ranks fuera de rango"
-        logger.info("✓ Todos los ranks están en rango válido (1-200)")
+        logger.info("✓ Ranks OK")
 
-        # verifico que todas las fechas de la fact tienen match en dim_fecha
         fechas_huerfanas = conn.execute(text("""
-            SELECT COUNT(*) AS n
-            FROM   proyecto_spotify.fact_chart_entry fce
+            SELECT COUNT(*) FROM proyecto_spotify.fact_chart_entry fce
             LEFT JOIN proyecto_spotify.dim_fecha df USING (fecha_key)
-            WHERE  df.fecha_key IS NULL
+            WHERE df.fecha_key IS NULL
         """)).scalar()
         assert fechas_huerfanas == 0, f"Hay {fechas_huerfanas} fechas sin match en dim_fecha"
         logger.info("✓ Integridad referencial fecha OK")
@@ -260,7 +252,6 @@ def main():
     parser.add_argument("--port",     default=5432,   type=int)
     args = parser.parse_args()
 
-    # guardo el log en archivo además de consola para poder revisar qué pasó si algo falla
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -270,7 +261,6 @@ def main():
         ],
     )
 
-    # conexión a Aurora
     engine = create_engine(
         f"postgresql+psycopg2://postgres:{args.password}"
         f"@{args.host}:{args.port}/{args.database}",
@@ -278,14 +268,12 @@ def main():
     )
 
     try:
-        # limpio las tablas antes de cargar para que sea idempotente
         logger.info("Limpiando tablas para carga idempotente...")
         with engine.begin() as conn:
             conn.execute(text("TRUNCATE proyecto_spotify.fact_chart_entry RESTART IDENTITY CASCADE"))
             conn.execute(text("TRUNCATE proyecto_spotify.dim_cancion      RESTART IDENTITY CASCADE"))
         logger.info("Tablas limpiadas")
 
-        # cargo dim_region en memoria para resolver FKs sin hacer queries por cada fila
         with engine.connect() as conn:
             region_map = {
                 r.region: r.region_key
@@ -295,31 +283,24 @@ def main():
             }
         logger.info("dim_region cargada en memoria: %d regiones", len(region_map))
 
-        # el CSV tiene ~26M filas, con chunks de 50k son ~520 iteraciones
-        reader = extract(args.csv)
-        total_chunks = 520   # estimado para que tqdm muestre el progreso bien
-
-        cancion_map = {}     # {(titulo, artista): cancion_key} — va creciendo chunk a chunk
+        reader      = extract(args.csv)
+        total_chunks = 520
+        cancion_map  = {}  # se va llenando chunk a chunk sin releer la tabla
 
         logger.info("Iniciando carga chunk por chunk (chunksize=%d)...", CHUNKSIZE)
 
         for chunk in tqdm(reader, total=total_chunks, desc="Procesando chunks"):
 
-            # Transform
             df = transform(chunk)
             if df.empty:
                 continue
 
-            # upsert canciones nuevas y actualizar mapa
-            cancion_map.update(upsert_canciones(df, engine))
+            upsert_canciones(df, engine, cancion_map)
 
-            # resolver FKs para la fact
-            df["cancion_key"] = df.apply(
-                lambda r: cancion_map.get((r["titulo"], r["artista"])), axis=1
-            )
-            df["region_key"] = df["region"].map(region_map)
+            # resolver FKs — ahora con map vectorizado en lugar de apply
+            df["cancion_key"] = df.set_index(["titulo", "artista"]).index.map(cancion_map).values
+            df["region_key"]  = df["region"].map(region_map)
 
-            # descarto filas donde no pude resolver alguna FK (región no encontrada en dim_region)
             df_fact = df.dropna(subset=["cancion_key", "region_key"]).copy()
 
             df_fact = df_fact[[
@@ -335,7 +316,6 @@ def main():
 
             load_fact(df_fact, engine)
 
-        # validaciones finales
         validate(engine)
         logger.info("ETL completado exitosamente")
 
