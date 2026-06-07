@@ -1,79 +1,113 @@
 """
-Dashboard — Spotify Charts: México vs el mundo (2017-2021)
-
-Genero 4 gráficos PNG usando consultas a Aurora PostgreSQL. Ejecuta esto
-después de que el ETL haya cargado los datos.
+Dashboard interactivo — Spotify Charts: México vs el mundo (2017-2021)
 
 Cómo usar:
-        export AURORA_HOST=aurora-mod4.cluster-XXX.us-east-1.rds.amazonaws.com
-        export AURORA_PASSWORD=tu_password
-        python dashboard/dashboard.py
+    Instala dependencias: pip install streamlit plotly pandas sqlalchemy psycopg2-binary
 
-O con argumentos:
-        python dashboard/dashboard.py \\
-                --host     aurora-mod4.cluster-XXX.us-east-1.rds.amazonaws.com \\
-                --password TU_PASSWORD \\
-                --database northwind
+    Ejecuta con Streamlit y pasa las credenciales como argumentos:
+    streamlit run dashboard/visualizaciones.py -- \\
+        --host     aurora-mod4.cluster-cr74j5deqarh.us-east-1.rds.amazonaws.com \\
+        --password TU_PASSWORD \\
+        --database northwind
 
-Salida: los PNG en `dashboard/img/`:
-    01_top_artistas.png
-    02_evolucion_trimestral.png
-    03_artistas_locales.png
-    04_streams_por_anio.png
+O usa variables de entorno:
+    export AURORA_HOST=aurora-mod4.cluster-cr74j5deqarh.us-east-1.rds.amazonaws.com
+    export AURORA_PASSWORD=TU_PASSWORD
+    streamlit run dashboard/visualizaciones.py
 """
 
 import argparse
-import logging
 import os
-import sys
-from pathlib import Path
 
-import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
 from sqlalchemy import create_engine, text
 
-logger = logging.getLogger("dashboard_spotify")
-OUT = Path(__file__).parent / "img"
-OUT.mkdir(exist_ok=True)
+# =============================================================================
+# Configuración de página
+# =============================================================================
 
-SCHEMA = "proyecto_spotify"
+st.set_page_config(
+    page_title="Spotify Charts: México vs el mundo",
+    layout="wide",
+)
+
+# Paleta de colores usada consistentemente en las visualizaciones.
+# Elegí tonos que recuerdan el tema de Spotify y que contrastan bien en plots.
+COLOR_VERDE   = "#1DB954"
+COLOR_NEGRO   = "#191414"
+COLOR_NARANJA = "#FF6B35"
+COLOR_ROJO    = "#E91429"
 
 
 # =============================================================================
-# Conexión
+# Conexión a Aurora
 # =============================================================================
 
-def conectar(host: str, password: str, database: str, port: int = 5432):
-    engine = create_engine(
+def get_engine():
+    """Crear un engine SQLAlchemy con credenciales tomadas de:
+
+    1) variables de entorno AURORA_HOST / AURORA_PASSWORD (preferido)
+    2) argumentos de la línea de comandos (fallback si no hay env)
+
+    Devuelvo un engine con pool_pre_ping para evitar conexiones muertas.
+    """
+    host     = os.environ.get("AURORA_HOST")
+    password = os.environ.get("AURORA_PASSWORD")
+    database = os.environ.get("AURORA_DATABASE", "northwind")
+    port     = int(os.environ.get("AURORA_PORT", 5432))
+
+    if not host or not password:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--host",     default=host)
+        parser.add_argument("--password", default=password)
+        parser.add_argument("--database", default=database)
+        parser.add_argument("--port",     default=port, type=int)
+        args, _ = parser.parse_known_args()
+        host     = args.host
+        password = args.password
+        database = args.database
+        port     = args.port
+
+    if not host or not password:
+        st.error("Falta --host y --password. Ver instrucciones en el README.")
+        st.stop()
+
+    return create_engine(
         f"postgresql+psycopg2://postgres:{password}@{host}:{port}/{database}",
         pool_pre_ping=True,
     )
-    # Compruebo la conexión para fallar rápido si algo anda mal
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    logger.info("Conexión a Aurora establecida correctamente")
-    return engine
+
+
+# Cacheo la conexión: Streamlit mantiene el recurso entre reruns para usar el
+# mismo engine y evitar re-conexiones innecesarias cuando el usuario interactúa.
+@st.cache_resource
+def engine():
+    return get_engine()
 
 
 # =============================================================================
-# Queries
+# Queries — cacheadas para no re-ejecutar en cada interacción
 # =============================================================================
 
-def query_top_artistas(engine) -> pd.DataFrame:
-    """Devuelvo un DataFrame con el top 10 de artistas por streams totales
-    en México y en el chart Global. 
+@st.cache_data(ttl=600)
+def load_top_artistas():
+    """Devuelvo el top 10 de artistas por streams totales en México y Global.
+
+    El DataFrame contiene: region, artista, streams_totales, dias_en_chart, posicion.
     """
     return pd.read_sql(text("""
         WITH streams_por_artista AS (
             SELECT
                 dr.region,
                 dc.artista,
-                SUM(fce.streams)                AS streams_totales,
-                COUNT(DISTINCT fce.fecha_key)   AS dias_en_chart
-            FROM      proyecto_spotify.fact_chart_entry   fce
-            JOIN      proyecto_spotify.dim_cancion        dc  USING (cancion_key)
-            JOIN      proyecto_spotify.dim_region         dr  USING (region_key)
+                SUM(fce.streams)              AS streams_totales,
+                COUNT(DISTINCT fce.fecha_key) AS dias_en_chart
+            FROM      proyecto_spotify.fact_chart_entry fce
+            JOIN      proyecto_spotify.dim_cancion      dc  USING (cancion_key)
+            JOIN      proyecto_spotify.dim_region       dr  USING (region_key)
             WHERE     fce.chart_key = 1
               AND     fce.streams IS NOT NULL
               AND     (dr.es_mexico OR dr.es_global)
@@ -82,32 +116,31 @@ def query_top_artistas(engine) -> pd.DataFrame:
         ranking AS (
             SELECT
                 region, artista, streams_totales, dias_en_chart,
-                RANK() OVER (
-                    PARTITION BY region
-                    ORDER BY streams_totales DESC
-                ) AS posicion
+                RANK() OVER (PARTITION BY region ORDER BY streams_totales DESC) AS posicion
             FROM streams_por_artista
         )
         SELECT * FROM ranking WHERE posicion <= 10
         ORDER BY region DESC, posicion
-    """), engine)
+    """), engine())
 
 
-def query_evolucion_trimestral(engine) -> pd.DataFrame:
-    """Devuelvo la evolución trimestral de streams en México.
-    Incluyo el % de cambio respecto al trimestre anterior.
+@st.cache_data(ttl=600)
+def load_evolucion_trimestral():
+    """Devuelvo la evolución trimestral de streams en México, con % de cambio.
+
+    Columnas: anio, trimestre, streams_totales, artistas_distintos, pct_cambio.
     """
     return pd.read_sql(text("""
         WITH trimestral AS (
             SELECT
                 df.anio,
                 df.trimestre,
-                SUM(fce.streams)            AS streams_totales,
-                COUNT(DISTINCT dc.artista)  AS artistas_distintos
-            FROM      proyecto_spotify.fact_chart_entry  fce
-            JOIN      proyecto_spotify.dim_fecha         df  USING (fecha_key)
-            JOIN      proyecto_spotify.dim_cancion       dc  USING (cancion_key)
-            JOIN      proyecto_spotify.dim_region        dr  USING (region_key)
+                SUM(fce.streams)           AS streams_totales,
+                COUNT(DISTINCT dc.artista) AS artistas_distintos
+            FROM      proyecto_spotify.fact_chart_entry fce
+            JOIN      proyecto_spotify.dim_fecha        df  USING (fecha_key)
+            JOIN      proyecto_spotify.dim_cancion      dc  USING (cancion_key)
+            JOIN      proyecto_spotify.dim_region       dr  USING (region_key)
             WHERE     dr.es_mexico
               AND     fce.chart_key = 1
               AND     fce.streams IS NOT NULL
@@ -122,23 +155,25 @@ def query_evolucion_trimestral(engine) -> pd.DataFrame:
             ) AS pct_cambio
         FROM trimestral
         ORDER BY anio, trimestre
-    """), engine)
+    """), engine())
 
 
-def query_artistas_locales(engine) -> pd.DataFrame:
-    """Top 20 artistas que aparecen mucho en México pero no en el chart global.
-    Me sirve para detectar artistas "locales".
+@st.cache_data(ttl=600)
+def load_artistas_locales():
+    """Devuelvo artistas populares en México que no aparecen en el chart global.
+
+    Filtra artistas con >=30 entradas en México y que no aparecen en global.
     """
     return pd.read_sql(text("""
         WITH artistas_mexico AS (
             SELECT
                 dc.artista,
-                COUNT(*)            AS entradas_mx,
-                SUM(fce.streams)    AS streams_mx,
-                MIN(fce.rank)       AS mejor_rank_mx
-            FROM      proyecto_spotify.fact_chart_entry  fce
-            JOIN      proyecto_spotify.dim_cancion       dc  USING (cancion_key)
-            JOIN      proyecto_spotify.dim_region        dr  USING (region_key)
+                COUNT(*)         AS entradas_mx,
+                SUM(fce.streams) AS streams_mx,
+                MIN(fce.rank)    AS mejor_rank_mx
+            FROM      proyecto_spotify.fact_chart_entry fce
+            JOIN      proyecto_spotify.dim_cancion      dc  USING (cancion_key)
+            JOIN      proyecto_spotify.dim_region       dr  USING (region_key)
             WHERE     dr.es_mexico
               AND     fce.chart_key = 1
               AND     fce.streams IS NOT NULL
@@ -147,231 +182,271 @@ def query_artistas_locales(engine) -> pd.DataFrame:
         ),
         artistas_global AS (
             SELECT DISTINCT dc.artista
-            FROM      proyecto_spotify.fact_chart_entry  fce
-            JOIN      proyecto_spotify.dim_cancion       dc  USING (cancion_key)
-            JOIN      proyecto_spotify.dim_region        dr  USING (region_key)
+            FROM      proyecto_spotify.fact_chart_entry fce
+            JOIN      proyecto_spotify.dim_cancion      dc  USING (cancion_key)
+            JOIN      proyecto_spotify.dim_region       dr  USING (region_key)
             WHERE     dr.es_global AND fce.chart_key = 1
         )
         SELECT mx.artista, mx.entradas_mx, mx.streams_mx, mx.mejor_rank_mx
-        FROM        artistas_mexico  mx
-        LEFT JOIN   artistas_global  gl  ON mx.artista = gl.artista
-        WHERE       gl.artista IS NULL
-        ORDER BY    mx.streams_mx DESC
+        FROM      artistas_mexico mx
+        LEFT JOIN artistas_global gl ON mx.artista = gl.artista
+        WHERE     gl.artista IS NULL
+        ORDER BY  mx.streams_mx DESC
         LIMIT 20
-    """), engine)
+    """), engine())
 
 
-def query_streams_por_anio(engine) -> pd.DataFrame:
-    """Saco estadísticas por año: mediana, P95, promedio y máximo de streams
-    para entradas del chart en México.
+@st.cache_data(ttl=600)
+def load_streams_por_anio():
+    """Devuelvo estadísticas por año: entradas, promedio, mediana (P50), P95 y máximo.
+
+    Útil para analizar si el umbral de streams para entrar al chart cambió.
     """
     return pd.read_sql(text("""
         SELECT
             df.anio,
-            COUNT(*)                                                    AS entradas,
-            ROUND(AVG(fce.streams), 0)                                  AS promedio,
-            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY fce.streams)   AS mediana,
-            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY fce.streams)   AS p95,
-            MAX(fce.streams)                                            AS maximo
-        FROM      proyecto_spotify.fact_chart_entry  fce
-        JOIN      proyecto_spotify.dim_fecha         df  USING (fecha_key)
-        JOIN      proyecto_spotify.dim_region        dr  USING (region_key)
+            COUNT(*)                                                   AS entradas,
+            ROUND(AVG(fce.streams), 0)                                 AS promedio,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY fce.streams)  AS mediana,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY fce.streams)  AS p95,
+            MAX(fce.streams)                                           AS maximo
+        FROM      proyecto_spotify.fact_chart_entry fce
+        JOIN      proyecto_spotify.dim_fecha        df  USING (fecha_key)
+        JOIN      proyecto_spotify.dim_region       dr  USING (region_key)
         WHERE     dr.es_mexico
           AND     fce.chart_key = 1
           AND     fce.streams IS NOT NULL
         GROUP BY  df.anio
         ORDER BY  df.anio
-    """), engine)
+    """), engine())
 
 
 # =============================================================================
-# Visualizaciones
+# Header
 # =============================================================================
 
-def viz_top_artistas(df: pd.DataFrame):
-    """
-    Viz 1 — Top 10 artistas por streams totales: México vs Global
-    Grafica los 10 mejores por región para comparar.
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-    fig.suptitle(
-        "Top 10 artistas por streams totales (2017-2021)\nMéxico vs Global — Spotify Top 200",
-        fontsize=14, fontweight="bold", y=1.01,
-    )
-
-    regiones = [("Mexico", axes[0], "#1DB954"), ("Global", axes[1], "#191414")]
-    for region, ax, color in regiones:
-        sub = df[df["region"] == region].sort_values("streams_totales")
-        bars = ax.barh(
-            sub["artista"], sub["streams_totales"] / 1e9,
-            color=color, edgecolor="black", linewidth=0.5, alpha=0.85,
-        )
-        ax.set_xlabel("Streams totales (miles de millones)")
-        ax.set_title(f"{'México 🇲🇽' if region == 'Mexico' else 'Global 🌍'}", fontsize=13)
-        ax.grid(True, axis="x", alpha=0.3)
-    for bar, val in zip(bars, sub["streams_totales"] / 1e9):
-        # Etiqueta simple al final de cada barra con valor en miles de millones
-        ax.text(val + 0.01, bar.get_y() + bar.get_height() / 2,
-            f"{val:.2f}B", va="center", fontsize=8)
-
-    plt.tight_layout()
-    plt.savefig(OUT / "01_top_artistas.png", dpi=110, bbox_inches="tight")
-    plt.close()
-    logger.info("✓ 01_top_artistas.png generada")
-
-
-def viz_evolucion_trimestral(df: pd.DataFrame):
-    """
-    Viz 2 — Evolución trimestral de streams en México
-    Combina barras (streams) y línea (% cambio).
-    """
-    fig, ax1 = plt.subplots(figsize=(13, 6))
-
-    etiquetas = [f"{r.anio}-Q{r.trimestre}" for _, r in df.iterrows()]
-    x = range(len(etiquetas))
-
-    # Dibujo de barras: streams totales
-    bars = ax1.bar(x, df["streams_totales"] / 1e9, color="#1DB954",
-                   edgecolor="black", linewidth=0.5, alpha=0.8, label="Streams (miles de millones)")
-    ax1.set_ylabel("Streams totales (miles de millones)", color="#1DB954")
-    ax1.tick_params(axis="y", labelcolor="#1DB954")
-
-    # Línea: % de cambio respecto al trimestre anterior
-    ax2 = ax1.twinx()
-    pct = df["pct_cambio"].fillna(0)
-    ax2.plot(x, pct, color="#E91429", marker="o", linewidth=2,
-             label="% cambio vs trimestre anterior")
-    ax2.axhline(0, color="gray", linestyle="--", linewidth=0.8)
-    ax2.set_ylabel("% cambio trimestral", color="#E91429")
-    ax2.tick_params(axis="y", labelcolor="#E91429")
-
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(etiquetas, rotation=45, ha="right", fontsize=8)
-    ax1.set_title(
-        "Evolución trimestral de streams en México (2017-2021)\nSpotify Top 200",
-        fontsize=13, fontweight="bold",
-    )
-    ax1.grid(True, axis="y", alpha=0.3)
-
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9)
-
-    plt.tight_layout()
-    plt.savefig(OUT / "02_evolucion_trimestral.png", dpi=110, bbox_inches="tight")
-    plt.close()
-    logger.info("✓ 02_evolucion_trimestral.png generada")
-
-
-def viz_artistas_locales(df: pd.DataFrame):
-    """
-    Viz 3 — Artistas locales invisibles globalmente
-    Muestra top 15 locales (por streams) y su mejor rank.
-    """
-    top15 = df.head(15).sort_values("streams_mx")
-
-    fig, ax = plt.subplots(figsize=(12, 7))
-    bars = ax.barh(
-        top15["artista"], top15["streams_mx"] / 1e6,
-        color="#FF6B35", edgecolor="black", linewidth=0.5, alpha=0.85,
-    )
-    ax.set_xlabel("Streams totales en México (millones)")
-    ax.set_title(
-        "Artistas populares en México pero ausentes del chart global\n"
-        "Top 15 por streams — Spotify Top 200 (2017-2021)",
-        fontsize=13, fontweight="bold",
-    )
-    ax.grid(True, axis="x", alpha=0.3)
-
-    for bar, row in zip(bars, top15.itertuples()):
-        # Anotación sencilla con millones y mejor posición alcanzada
-        ax.text(
-            bar.get_width() + 1, bar.get_y() + bar.get_height() / 2,
-            f"{row.streams_mx / 1e6:.0f}M  (rank #{row.mejor_rank_mx})",
-            va="center", fontsize=8,
-        )
-
-    plt.tight_layout()
-    plt.savefig(OUT / "03_artistas_locales.png", dpi=110, bbox_inches="tight")
-    plt.close()
-    logger.info("✓ 03_artistas_locales.png generada")
-
-
-def viz_streams_por_anio(df: pd.DataFrame):
-    """
-    Viz 4 — Distribución de streams por año en México (mediana y P95)
-    Compara mediana, P95 y promedio por año.
-    """
-    x = df["anio"].astype(str)
-    x_pos = range(len(x))
-    ancho = 0.3
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    ax.bar([p - ancho / 2 for p in x_pos], df["mediana"] / 1e6,
-           width=ancho, label="Mediana", color="#1DB954",
-           edgecolor="black", linewidth=0.5, alpha=0.85)
-    ax.bar([p + ancho / 2 for p in x_pos], df["p95"] / 1e6,
-           width=ancho, label="Percentil 95", color="#191414",
-           edgecolor="black", linewidth=0.5, alpha=0.85)
-    ax.plot(x_pos, df["promedio"] / 1e6, color="#E91429",
-            marker="D", linewidth=2, label="Promedio", zorder=5)
-
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(x)
-    ax.set_xlabel("Año")
-    ax.set_ylabel("Streams (millones)")
-    ax.set_title(
-        "Distribución de streams por año en México\n"
-        "Mediana, Percentil 95 y Promedio — Spotify Top 200",
-        fontsize=13, fontweight="bold",
-    )
-    ax.legend(fontsize=10)
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.1f}M"))
-
-    plt.tight_layout()
-    plt.savefig(OUT / "04_streams_por_anio.png", dpi=110, bbox_inches="tight")
-    plt.close()
-    logger.info("✓ 04_streams_por_anio.png generada")
-
+st.title("Spotify Charts: México vs el mundo")
+st.markdown("**2017 – 2021 · Top 200 · Análisis comparativo de consumo musical**")
+st.divider()
 
 # =============================================================================
-# Main
+# Viz 1 — Top 10 artistas: México vs Global
 # =============================================================================
 
-def main():
-    parser = argparse.ArgumentParser(description="Dashboard Spotify Charts → PNG")
-    parser.add_argument("--host",     default=os.environ.get("AURORA_HOST"))
-    parser.add_argument("--password", default=os.environ.get("AURORA_PASSWORD"))
-    parser.add_argument("--database", default=os.environ.get("AURORA_DATABASE", "northwind"))
-    parser.add_argument("--port",     default=5432, type=int)
-    args = parser.parse_args()
+st.subheader("Top 10 artistas por streams totales")
+st.caption("¿Quién domina en México comparado con el chart global?")
 
-    if not args.host or not args.password:
-        # Mensaje para el que use este script: necesita host y password
-        print(
-            "ERROR: Debes proporcionar --host y --password, "
-            "o definir AURORA_HOST y AURORA_PASSWORD como variables de entorno."
-        )
-        sys.exit(1)
+df_top = load_top_artistas()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
+# Slicer: permite al usuario elegir cuántos artistas mostrar (5-10)
+n_artistas = st.slider("Número de artistas a mostrar", min_value=5, max_value=10, value=10, key="slider_top")
+
+col1, col2 = st.columns(2)
+
+# Nota sobre regiones: en la dimensión las regiones clave son 'Mexico' y 'Global'
+# (uso esas cadenas para filtrar; ojo con mayúsculas/minúsculas si cambias la fuente).
+for region, col, color, titulo in [
+    ("Mexico", col1, COLOR_VERDE, "México"),
+    ("Global", col2, COLOR_NEGRO, "Global"),
+]:
+    # Filtrar por región y ordenar para graficar en horizontal (barh)
+    sub = df_top[df_top["region"] == region].head(n_artistas).sort_values("streams_totales")
+    fig = px.bar(
+        sub,
+        x="streams_totales",
+        y="artista",
+        orientation="h",
+        text=sub["streams_totales"].apply(lambda v: f"{v/1e9:.2f}B"),
+        color_discrete_sequence=[color],
     )
+    # Pongo los valores como texto fuera de las barras para mejor lectura
+    fig.update_traces(textposition="outside")
+    fig.update_layout(
+        title=titulo,
+        xaxis_title="Streams totales",
+        yaxis_title="",
+        xaxis_tickformat=".1s",
+        plot_bgcolor="white",
+        height=400,
+        margin=dict(l=10, r=80, t=40, b=40),
+    )
+    col.plotly_chart(fig, use_container_width=True)
 
-    engine = conectar(args.host, args.password, args.database, args.port)
+st.divider()
 
-    logger.info("Ejecutando queries y generando visualizaciones...")
+# =============================================================================
+# Viz 2 — Evolución trimestral de streams en México
+# =============================================================================
 
-    viz_top_artistas(query_top_artistas(engine))
-    viz_evolucion_trimestral(query_evolucion_trimestral(engine))
-    viz_artistas_locales(query_artistas_locales(engine))
-    viz_streams_por_anio(query_streams_por_anio(engine))
+st.subheader("Evolución trimestral de streams en México")
+st.caption("¿Cómo creció el consumo musical entre 2017 y 2021?")
 
-    logger.info("Dashboard completo — 4 imágenes en %s/", OUT)
+df_trim = load_evolucion_trimestral()
+df_trim["periodo"] = df_trim["anio"].astype(str) + "-Q" + df_trim["trimestre"].astype(str)
 
+# Slicer: rango de años para filtrar la serie trimestral
+anios = sorted(df_trim["anio"].unique().tolist())
+anio_min, anio_max = st.select_slider(
+    "Rango de años",
+    options=anios,
+    value=(anios[0], anios[-1]),
+    key="slider_anios",
+)
+df_trim_f = df_trim[(df_trim["anio"] >= anio_min) & (df_trim["anio"] <= anio_max)]
 
-if __name__ == "__main__":
-    main()
+fig2 = go.Figure()
+
+# Barras: muestran streams totales por periodo (eje izquierdo)
+fig2.add_trace(go.Bar(
+    x=df_trim_f["periodo"],
+    y=df_trim_f["streams_totales"] / 1e9,
+    name="Streams (miles de millones)",
+    marker_color=COLOR_VERDE,
+    opacity=0.85,
+    yaxis="y1",
+))
+
+ # Línea: % cambio trimestral (eje derecho) para ver dinamismo trimestre a trimestre
+fig2.add_trace(go.Scatter(
+    x=df_trim_f["periodo"],
+    y=df_trim_f["pct_cambio"].fillna(0),
+    name="% cambio vs trimestre anterior",
+    mode="lines+markers",
+    line=dict(color=COLOR_ROJO, width=2),
+    marker=dict(size=6),
+    yaxis="y2",
+))
+
+fig2.update_layout(
+    xaxis=dict(tickangle=-45),
+    yaxis=dict(
+        title="Streams (miles de millones)",
+        color=COLOR_VERDE,
+    ),
+    yaxis2=dict(
+        title="% cambio trimestral",
+        color=COLOR_ROJO,
+        overlaying="y",
+        side="right",
+        zeroline=True,
+    ),
+    plot_bgcolor="white",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    height=420,
+    margin=dict(l=10, r=10, t=40, b=80),
+)
+
+st.plotly_chart(fig2, use_container_width=True)
+st.divider()
+
+# =============================================================================
+# Viz 3 — Artistas locales invisibles globalmente
+# =============================================================================
+
+st.subheader("Artistas populares en México pero invisibles globalmente")
+st.caption("¿Quiénes dominan México pero nunca aparecieron en el chart global?")
+
+df_local = load_artistas_locales()
+
+# Slicer: cuántos artistas locales mostrar (5-20)
+n_local = st.slider("Número de artistas a mostrar", min_value=5, max_value=20, value=15, key="slider_local")
+df_local_f = df_local.head(n_local).sort_values("streams_mx")
+
+# Grafico horizontal con color por mejor rank para indicar popularidad relativa
+fig3 = px.bar(
+    df_local_f,
+    x="streams_mx",
+    y="artista",
+    orientation="h",
+    text=df_local_f["streams_mx"].apply(lambda v: f"{v/1e6:.0f}M"),
+    color="mejor_rank_mx",
+    color_continuous_scale=["#1DB954", "#FF6B35", "#E91429"],
+    labels={"mejor_rank_mx": "Mejor rank en México", "streams_mx": "Streams en México"},
+)
+fig3.update_traces(textposition="outside")
+fig3.update_layout(
+    xaxis_title="Streams totales en México",
+    yaxis_title="",
+    xaxis_tickformat=".2s",
+    plot_bgcolor="white",
+    height=500,
+    margin=dict(l=10, r=80, t=20, b=40),
+    coloraxis_colorbar=dict(title="Mejor rank"),
+)
+
+st.plotly_chart(fig3, use_container_width=True)
+st.divider()
+
+# =============================================================================
+# Viz 4 — Distribución de streams por año
+# =============================================================================
+
+st.subheader("Distribución de streams por año en México")
+st.caption("¿Creció el piso de streams necesario para entrar al Top 200?")
+
+df_anio = load_streams_por_anio()
+
+# Multiselect: permite elegir qué métricas mostrar en el gráfico por año
+metricas = st.multiselect(
+    "Métricas a mostrar",
+    options=["Mediana", "Percentil 95", "Promedio"],
+    default=["Mediana", "Percentil 95", "Promedio"],
+    key="metricas",
+)
+
+fig4 = go.Figure()
+
+if "Mediana" in metricas:
+    fig4.add_trace(go.Bar(
+        x=df_anio["anio"].astype(str),
+        y=df_anio["mediana"] / 1e6,
+        name="Mediana",
+        marker_color=COLOR_VERDE,
+        opacity=0.85,
+        offsetgroup=0,
+    ))
+
+if "Percentil 95" in metricas:
+    fig4.add_trace(go.Bar(
+        x=df_anio["anio"].astype(str),
+        y=df_anio["p95"] / 1e6,
+        name="Percentil 95",
+        marker_color=COLOR_NEGRO,
+        opacity=0.85,
+        offsetgroup=1,
+    ))
+
+if "Promedio" in metricas:
+    fig4.add_trace(go.Scatter(
+        x=df_anio["anio"].astype(str),
+        y=df_anio["promedio"] / 1e6,
+        name="Promedio",
+        mode="lines+markers",
+        line=dict(color=COLOR_ROJO, width=2),
+        marker=dict(size=8, symbol="diamond"),
+    ))
+
+fig4.update_layout(
+    xaxis_title="Año",
+    yaxis_title="Streams (millones)",
+    yaxis_ticksuffix="M",
+    plot_bgcolor="white",
+    barmode="group",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    height=400,
+    margin=dict(l=10, r=10, t=40, b=40),
+)
+
+st.plotly_chart(fig4, use_container_width=True)
+
+# =============================================================================
+# Footer con métricas generales del dataset
+# =============================================================================
+
+st.divider()
+st.markdown("#### Resumen del dataset")
+col_a, col_b, col_c, col_d = st.columns(4)
+col_a.metric("Entradas en fact", "25,450,563")
+col_b.metric("Canciones únicas", "197,533")
+col_c.metric("Regiones", "69")
+col_d.metric("Período", "2017 – 2021")
