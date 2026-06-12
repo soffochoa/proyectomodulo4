@@ -3,19 +3,21 @@
 -- =============================================================================
 -- Schema  : proyecto_spotify
 -- Grano   : una fila por (canción × región × chart × fecha)
---           = una entrada en un chart de Spotify para un día y región concretos
--- Fuente  : charts.csv — Top 200 y Viral 50 (descargado de Kaggle)
+--           = una entrada en un chart de Spotify en un día y región específicos
+-- Fuente  : charts.csv — Spotify Top 200 y Viral 50 (Kaggle)
 -- =============================================================================
 
 CREATE SCHEMA IF NOT EXISTS proyecto_spotify;
 SET search_path TO proyecto_spotify;
+
+
 -- -----------------------------------------------------------------------------
 -- DIMENSIONES
 -- -----------------------------------------------------------------------------
 
 -- Dimensión fecha
--- Me permite agrupar por año/trimestre/mes y detectar patrones en el tiempo.
--- Uso una "smart key" (YYYYMMDD como INT) para joins simples y rápidos.
+-- Permite agrupar por año, trimestre, mes y detectar patrones temporales.
+-- La smart key (YYYYMMDD como INT) evita joins costosos por DATE.
 CREATE TABLE dim_fecha (
     fecha_key           INT          PRIMARY KEY,        -- smart key YYYYMMDD
     fecha_completa      DATE         NOT NULL UNIQUE,
@@ -30,9 +32,11 @@ CREATE TABLE dim_fecha (
 );
 
 -- Dimensión canción
--- Incluyo artista como atributo directo porque el CSV guarda el artista como
--- una sola cadena (p. ej. "DJ Snake, Justin Bieber"). Hacer una tabla puente
--- many-to-many complicaría el modelo sin aportar mucho para estas preguntas.
+-- Incluye artista como atributo directo: decisión de diseño justificada porque
+-- el CSV original representa artistas compuestos como una sola cadena
+-- (e.g. "DJ Snake, Justin Bieber"), separar implicaría una tabla puente
+-- muchos-a-muchos que añade complejidad sin beneficio analítico para la
+-- pregunta planteada.
 CREATE TABLE dim_cancion (
     cancion_key     INT             GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     titulo          VARCHAR(500)    NOT NULL,
@@ -42,9 +46,9 @@ CREATE TABLE dim_cancion (
 );
 
 -- Dimensión región
--- Contiene países/regiones del chart y la región especial "Global".
--- Las columnas booleanas (es_global, es_mexico) me permiten filtrar fácil
--- sin escribir literales en las consultas.
+-- Contiene todos los países/regiones del chart más la región "Global".
+-- La columna es_global facilita el filtrado central de la pregunta analítica
+-- (México vs Global) sin requerir un WHERE con literal.
 CREATE TABLE dim_region (
     region_key      INT             GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     region          VARCHAR(60)     NOT NULL UNIQUE,
@@ -53,8 +57,8 @@ CREATE TABLE dim_region (
 );
 
 -- Dimensión chart
--- Separa Top 200 (tiene streams) de Viral 50 (sin streams).
--- La idea es poder filtrar por tipo de chart desde el dashboard.
+-- Separa Top 200 (medible por streams) de Viral 50 (sin streams).
+-- Permite filtrar chart_tipo en el dashboard con un slicer limpio.
 CREATE TABLE dim_chart (
     chart_key       SMALLINT        PRIMARY KEY,        -- 1=top200, 2=viral50
     nombre          VARCHAR(20)     NOT NULL UNIQUE,    -- 'top200' | 'viral50'
@@ -67,8 +71,9 @@ CREATE TABLE dim_chart (
 -- -----------------------------------------------------------------------------
 
 -- fact_chart_entry
--- Cada fila es una aparición de una canción en un chart para una región y fecha.
--- Medidas principales: rank, streams (NULL para viral50) y trend (movimiento).
+-- Cada fila representa la aparición de una canción en un chart,
+-- para una región específica, en una fecha específica.
+-- Medidas: rank (posición), streams (nulos para viral50), trend (movimiento).
 CREATE TABLE fact_chart_entry (
     entry_id        BIGINT          GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     fecha_key       INT             NOT NULL REFERENCES dim_fecha(fecha_key),
@@ -80,8 +85,8 @@ CREATE TABLE fact_chart_entry (
     trend           VARCHAR(15)                         -- MOVE_UP, MOVE_DOWN, SAME_POSITION, NEW_ENTRY
 );
 
--- Índices para las queries que usaré en análisis
--- Consultas frecuentes: filtro por región+fecha, por canción o por chart
+-- Índices para las queries analíticas principales
+-- Consultas frecuentes: filtrar por región + fecha, por canción, por chart
 CREATE INDEX idx_fact_region_fecha   ON fact_chart_entry(region_key, fecha_key);
 CREATE INDEX idx_fact_cancion        ON fact_chart_entry(cancion_key);
 CREATE INDEX idx_fact_fecha_chart    ON fact_chart_entry(fecha_key, chart_key);
@@ -89,7 +94,7 @@ CREATE INDEX idx_fact_region_chart   ON fact_chart_entry(region_key, chart_key);
 
 
 -- -----------------------------------------------------------------------------
--- CATÁLOGO INICIAL — dim_chart (solo 2 valores, se inserta con el schema)
+-- CATÁLOGO INICIAL — dim_chart (solo 2 valores, se carga con el schema)
 -- -----------------------------------------------------------------------------
 
 INSERT INTO dim_chart (chart_key, nombre, descripcion) VALUES
@@ -100,12 +105,19 @@ INSERT INTO dim_chart (chart_key, nombre, descripcion) VALUES
 -- =============================================================================
 -- VERIFICACIÓN
 -- =============================================================================
--- Ejecuta esto después de crear el schema para comprobar que quedaron las 5 tablas:
+-- Ejecutar tras crear el schema para confirmar las 5 tablas:
 --
---   SELECT table_name
---   FROM   information_schema.tables
---   WHERE  table_schema = 'proyecto_spotify'
---   ORDER  BY table_name;
---
--- Resultado esperado: dim_cancion, dim_chart, dim_fecha, dim_region, fact_chart_entry
+   SELECT table_name
+   FROM   information_schema.tables
+   WHERE  table_schema = 'proyecto_spotify'
+   ORDER  BY table_name;
+
+
+SELECT column_name 
+FROM information_schema.columns 
+WHERE table_schema = 'proyecto_spotify' 
+AND table_name = 'dim_fecha'
+ORDER BY ordinal_position;
+
+-- Esperado: dim_cancion, dim_chart, dim_fecha, dim_region, fact_chart_entry
 -- =============================================================================

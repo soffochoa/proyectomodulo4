@@ -2,153 +2,153 @@
 
 ## Pregunta analítica
 
-¿Qué tan diferente es el gusto musical de México comparado con el chart global de Spotify entre 2017 y 2021? ¿Existen artistas que dominan el chart mexicano pero son invisibles globalmente, y cómo ha evolucionado esa brecha cultural a lo largo del tiempo?
+La idea de este proyecto surgió de una observación bastante simple: cuando escucho Spotify en México suena muy diferente a lo que aparece en los rankings globales. Eso me llevó a preguntarme si esa diferencia se puede medir y cuantificar con datos reales.
 
-La pregunta tiene tres subpreguntas concretas:
+La pregunta central es: **¿qué tan diferente es el gusto musical de México comparado con el chart global de Spotify entre 2017 y 2021?** Y de ahí se desprenden tres subpreguntas más concretas que son las que guían todo el análisis:
 
-1. ¿Qué artistas acumularon más streams en México vs el chart global?
-2. ¿Hay artistas con presencia sostenida en México que nunca aparecieron globalmente?
-3. ¿Cómo creció el volumen de consumo musical en México entre 2017 y 2021?
+1. ¿Qué artistas acumularon más streams en México comparado con el chart global?
+2. ¿Hay artistas que dominan México pero que globalmente son completamente invisibles?
+3. ¿Cómo fue creciendo el consumo musical en México a lo largo de esos cinco años?
 
 ## Dataset
 
-Spotify Charts — Kaggle (dhruvildave/spotify-charts)
+Usé el dataset **Spotify Charts** de Kaggle, publicado por dhruvildave. Contiene todas las entradas diarias de los charts Top 200 y Viral 50 que Spotify publica globalmente, desde enero de 2017 hasta diciembre de 2021. Cubre más de 60 regiones del mundo incluyendo México y un chart Global agregado.
 
-Contiene todas las entradas diarias de los charts Top 200 y Viral 50 publicados por Spotify a nivel global desde enero de 2017 hasta diciembre de 2021. El archivo `charts.csv` tiene aproximadamente 26 millones de filas y 9 columnas: título, artista, rank, fecha, región, tipo de chart, tendencia, URL y streams.
+El archivo `charts.csv` tiene aproximadamente **26 millones de filas** con estas columnas: título de la canción, artista, posición en el ranking, fecha, región, tipo de chart (top200 o viral50), tendencia del día (subió, bajó, se mantuvo), URL de Spotify y número de streams.
 
-El dataset permite responder la pregunta porque tiene dimensión temporal diaria, cobertura de más de 60 regiones incluyendo México y Global, y la métrica de streams que permite comparar volúmenes reales de consumo entre regiones.
+Este dataset es ideal para responder la pregunta porque tiene dimensión temporal diaria durante cinco años, cubre México y el chart Global en el mismo archivo, y tiene la métrica de streams que permite hacer comparaciones reales entre regiones — no solo ver quién aparece sino cuánto se escucha.
 
 Fuente: https://www.kaggle.com/datasets/dhruvildave/spotify-charts
 
-El archivo no está en el repositorio por su tamaño (3.48 GB). Para descargarlo ir al enlace anterior y hacer click en Download.
+El archivo no está incluido en el repositorio porque pesa 3.48 GB. Para reproducir el proyecto hay que descargarlo del enlace de arriba y colocarlo en `datasets/charts.csv`.
+
+Resultado final del ETL: **25,450,563 entradas** cargadas en `fact_chart_entry` y **197,533 canciones únicas** en `dim_cancion`.
 
 ## Modelo dimensional
 
-Esquema estrella con una tabla de hechos y cuatro dimensiones.
+El modelo es un esquema estrella con una tabla de hechos central y cuatro dimensiones. Elegí este diseño porque la pregunta analítica naturalmente se puede descomponer en "qué canción, en qué región, en qué fecha y en qué tipo de chart", que es exactamente lo que representan las dimensiones.
 
-Grano: una fila por canción en un chart, en una región, en una fecha específica.
+El **grano** de la fact table es una fila por canción en un chart, en una región, en una fecha específica. Cada fila representa una aparición concreta: por ejemplo, "Bad Bunny en el Top 200 de México el 15 de marzo de 2020, en la posición 3, con 450,000 streams".
 
 ```
-                   dim_fecha
-                      |
-dim_chart ---- fact_chart_entry ---- dim_region
-                      |
-                  dim_cancion
+              dim_fecha
+                  |
+dim_chart — fact_chart_entry — dim_region
+                  |
+              dim_cancion
 ```
 
-La tabla `fact_chart_entry` registra cada aparición de una canción en un chart con sus medidas: rank, streams y trend. Las dimensiones describen el contexto de cada entrada.
+`fact_chart_entry` guarda las medidas: rank (posición), streams (cuántas veces se escuchó ese día) y trend (si subió, bajó o se mantuvo respecto al día anterior). Las cuatro dimensiones describen el contexto de cada entrada.
 
-Decisiones de diseño:
+Algunas decisiones de diseño que vale la pena documentar:
 
-- El artista vive dentro de `dim_cancion` y no en una tabla separada porque el CSV representa artistas compuestos como una sola cadena (por ejemplo "DJ Snake, Justin Bieber"). Separar implicaría una tabla puente muchos-a-muchos que añade complejidad sin beneficio analítico para la pregunta planteada.
-- `dim_region` tiene dos columnas booleanas `es_global` y `es_mexico` que facilitan el filtrado central de la pregunta sin necesidad de literales en las queries.
-- `dim_fecha` se genera con `generate_series` de PostgreSQL para el rango 2017-2021, independientemente del CSV.
-- El diagrama completo del esquema está en `docs/diagrama_modelo.png`.
+**Artista dentro de dim_cancion:** decidí no crear una tabla `dim_artista` separada porque el CSV representa artistas colaboradores como una sola cadena de texto (por ejemplo "DJ Snake, Justin Bieber" o "Carlos Vives, Shakira"). Separar eso implicaría una tabla puente muchos-a-muchos que añade bastante complejidad al ETL sin aportar nada útil para la pregunta que quiero responder. Para este análisis lo que importa es el artista como aparece en el chart, no descomponerlo.
 
-DDL completo en `scripts/01_schema_ddl.sql`.
+**Flags en dim_region:** agregué dos columnas booleanas `es_global` y `es_mexico` en la dimensión de región. Esto hace que las queries del dashboard sean mucho más limpias — en lugar de escribir `WHERE region = 'Mexico'` en cada query, simplemente hago `WHERE dr.es_mexico = TRUE`. También evita bugs si el nombre de la región cambia.
+
+**dim_fecha con generate_series:** la dimensión de fechas la genero directamente con `generate_series` de PostgreSQL en el rango 2017-2021. No depende del CSV para nada, lo cual hace que ese paso sea reproducible independientemente del estado de los datos.
+
+El diagrama completo del esquema está en `docs/diagrama_modelo.png`. El DDL completo con todas las tablas e índices está en `scripts/01_schema_ddl.sql`.
 
 ## Infraestructura AWS
 
-Cluster Aurora PostgreSQL 17 en AWS (aurora-mod4), región us-east-1. El modelo dimensional vive en el schema `proyecto_spotify` dentro de la base de datos `northwind`.
+El modelo está desplegado en un cluster **Aurora PostgreSQL 17** en AWS (aurora-mod4), región us-east-1. Usé el mismo cluster del módulo con la base de datos `northwind`. El modelo dimensional vive en un schema separado llamado `proyecto_spotify` para no mezclar nada con las tablas del curso.
 
-## Cómo ejecutar
+## Cómo ejecutar el proyecto
 
-### Requisitos
-
-```
-Python 3.9 o superior
-pandas
-sqlalchemy
-psycopg2-binary
-tqdm
-matplotlib
-```
-
-Instalar con:
+### Dependencias
 
 ```bash
-pip install pandas sqlalchemy psycopg2-binary tqdm matplotlib
+pip install pandas sqlalchemy psycopg2-binary tqdm matplotlib streamlit plotly
 ```
 
-### 1. Crear el schema en Aurora
+### Paso 1 — Crear el schema en Aurora
 
-Ejecutar en DBeaver contra la base `northwind`, en este orden:
+Abrir DBeaver, conectarse a la base `northwind` del cluster Aurora, y ejecutar los siguientes scripts en orden. Para cada uno: abrir el archivo → Cmd+Shift+Enter en Mac o Ctrl+Shift+Enter en Windows para ejecutar el script completo.
 
 ```
-scripts/01_schema_ddl.sql
-scripts/02_dim_fecha_populate.sql
-scripts/03_dim_region_populate.sql
-scripts/04_dim_chart_populate.sql
+scripts/01_schema_ddl.sql        ← crea las 5 tablas del modelo
+scripts/02_dim_fecha_populate.sql ← llena dim_fecha con generate_series (2017-2021)
+scripts/03_dim_region_populate.sql ← inserta las 69 regiones del dataset
+scripts/04_dim_chart_populate.sql  ← inserta los 2 tipos de chart (top200, viral50)
 ```
 
-Abrir cada archivo en DBeaver y ejecutar con Ctrl+Shift+Enter (Windows) o Cmd+Shift+Enter (Mac).
+Al final de cada script hay una query de verificación comentada para confirmar que los datos cargaron bien.
 
-### 2. Correr el ETL
+### Paso 2 — Correr el ETL
 
 ```bash
 python scripts/etl_pipeline.py \
-    --host     aurora-mod4.cluster-cr74j5deqarh.us-east-1.rds.amazonaws.com \
+    --host     TU_HOST.rds.amazonaws.com \
     --password TU_PASSWORD \
     --database northwind \
     --csv      datasets/charts.csv
 ```
 
-El script lee el CSV en chunks de 50,000 filas para no saturar la memoria, carga `dim_cancion` y `fact_chart_entry`, y al final ejecuta validaciones de integridad. Tarda aproximadamente 60-90 minutos dependiendo de la conexión. El log se guarda en `etl_spotify.log`.
+El script lee el CSV en chunks de 50,000 filas para no cargar 3.48 GB en RAM de un jalón. Carga `dim_cancion` y `fact_chart_entry`, y al final ejecuta validaciones de integridad referencial y conteos. El log completo queda guardado en `etl_spotify.log`.
 
-El script es idempotente: si se re-corre, trunca las tablas antes de volver a cargar.
+Tiempo estimado: **60-90 minutos** dependiendo de la velocidad de la conexión a Aurora.
 
-Resultado esperado: 25,450,563 entradas en `fact_chart_entry`, 197,533 canciones únicas en `dim_cancion`.
+El script es idempotente: si se re-corre por cualquier razón, trunca las tablas antes de volver a cargar, así que no quedan datos duplicados.
 
-### 3. Generar el dashboard
+Resultado esperado al terminar:
+```
+Conteos — canciones: 197,533 | regiones: 69 | entradas fact: 25,450,563
+Mexico → 448,832 entradas
+✓ Ranks OK
+✓ Integridad referencial fecha OK
+```
+
+### Paso 3 — Abrir el dashboard
 
 ```bash
-python dashboard/visualizaciones.py \
-    --host     aurora-mod4.cluster-cr74j5deqarh.us-east-1.rds.amazonaws.com \
+streamlit run dashboard/visualizaciones.py -- \
+    --host     TU_HOST.rds.amazonaws.com \
     --password TU_PASSWORD \
     --database northwind
 ```
 
-Las 4 imágenes se guardan en `dashboard/img/`.
+Se abre automáticamente en `http://localhost:8501`. Tiene sliders y filtros interactivos en cada visualización. Las queries están cacheadas así que después de la primera carga navegar entre visualizaciones es instantáneo.
 
-### 4. Queries analíticas
+### Paso 4 — Queries analíticas en DBeaver
 
-Abrir `analisis/queries_analiticas.sql` en DBeaver y ejecutar cada query individualmente para explorar los resultados.
+Abrir `analisis/queries_analiticas.sql` en DBeaver y ejecutar cada query por separado para explorar los resultados directamente contra Aurora.
 
 ## SQL avanzado
 
-Las cinco queries en `analisis/queries_analiticas.sql` usan las siguientes técnicas:
+Las cinco queries en `analisis/queries_analiticas.sql` usan las técnicas de SQL avanzado del módulo. Ninguna es decorativa — todas responden una pregunta real del análisis:
 
-- Query 1: CTE + RANK() — top 10 artistas por streams en México vs Global
-- Query 2: CTE + LAG() — evolución trimestral de streams con delta porcentual
-- Query 3: CTEs encadenadas + ROW_NUMBER() — detección de rachas consecutivas en el Top 10
-- Query 4: PERCENTILE_CONT — distribución de streams por año (mediana y percentil 95)
-- Query 5: CTEs dobles + antipattern LEFT JOIN/IS NULL — artistas locales invisibles globalmente
+- **Query 1 — CTE + RANK():** calcula el top 10 de artistas por streams totales en México y Global en paralelo, usando RANK() con PARTITION BY región para hacer el ranking independiente por región.
+- **Query 2 — CTE + LAG():** calcula la evolución trimestral de streams en México. LAG() me da el valor del trimestre anterior para calcular el delta porcentual sin necesitar un self-join.
+- **Query 3 — CTEs encadenadas + ROW_NUMBER():** detecta rachas de semanas consecutivas en el Top 10. Usa el truco clásico de `semana - ROW_NUMBER()` para identificar grupos de semanas continuas.
+- **Query 4 — PERCENTILE_CONT:** calcula la mediana y el percentil 95 de streams por año en México. Sirve para ver si el "piso" de streams necesario para entrar al chart fue creciendo con los años.
+- **Query 5 — CTEs dobles + antipattern LEFT JOIN/IS NULL:** identifica artistas que tienen presencia significativa en México pero nunca aparecieron en el chart global. El LEFT JOIN con IS NULL es la forma más limpia de hacer ese antipattern en SQL.
 
 ## Dashboard
 
-Cuatro visualizaciones generadas con matplotlib a partir de queries contra Aurora:
+Cuatro visualizaciones interactivas con Streamlit y Plotly, conectadas directamente a Aurora. Cada una responde una de las subpreguntas del análisis.
 
 ![Top 10 artistas México vs Global](dashboard/img/01_top_artistas.png)
 
-**Viz 1 — Top 10 artistas por streams totales: México vs Global.** La diferencia de escala es inmediata: Ed Sheeran lidera el chart global con 13B streams mientras que Bad Bunny lidera México con 1.6B. El top 10 global está dominado por pop anglosajón (Ed Sheeran, Post Malone, Billie Eilish, Drake), mientras que el mexicano mezcla reggaetón, música regional y pop latino.
+**Viz 1 — Top 10 artistas por streams totales: México vs Global.** La diferencia de escala entre los dos charts es lo primero que salta a la vista: Ed Sheeran lidera el global con 13B streams mientras que Bad Bunny lidera México con 1.6B. El top global está completamente dominado por pop anglosajón (Ed Sheeran, Post Malone, Billie Eilish, Drake, Ariana Grande), mientras que el mexicano mezcla reggaetón (Bad Bunny, Maluma, Ozuna), música regional (Christian Nodal, Banda MS) y algo de pop latino. Dua Lipa es prácticamente el único artista que aparece en ambos top 10, lo que muestra cuán distintos son los gustos.
 
 ![Evolución trimestral](dashboard/img/02_evolucion_trimestral.png)
 
-**Viz 2 — Evolución trimestral de streams en México.** El volumen creció de forma sostenida desde 1.4B en Q1 2017 hasta un pico de 3.2B en Q3 2021. Se observa un salto notable en Q1 2020 (+22.7%) que coincide con el inicio de la pandemia, y una caída fuerte en Q4 2021 (-33.7%) que refleja que el dataset se corta a mitad de ese período.
+**Viz 2 — Evolución trimestral de streams en México.** El consumo creció de forma bastante sostenida desde 1.4B streams en Q1 2017 hasta un pico de 3.2B en Q3 2021. Hay un salto notable en Q1 2020 (+22% respecto al trimestre anterior) que coincide exactamente con el inicio del confinamiento por la pandemia — tiene mucho sentido que la gente en casa haya escuchado más música. La caída fuerte que se ve en Q4 2021 (-33%) no es una tendencia real sino un artefacto del dataset: los datos se cortan a finales de 2021 y ese trimestre está incompleto.
 
 ![Artistas locales](dashboard/img/03_artistas_locales.png)
 
-**Viz 3 — Artistas populares en México pero invisibles globalmente.** Banda MS de Sergio Lizárraga encabeza la lista con 615M streams en México sin una sola entrada en el chart global. Le siguen Danna Paola, Alejandro Fernández, León Larregui y Carin Leon. La lista es predominantemente de música regional mexicana y pop latino, lo que confirma la identidad musical diferenciada de México.
+**Viz 3 — Artistas populares en México pero invisibles globalmente.** Esta es la visualización más interesante del proyecto porque responde directamente la pregunta central. Banda MS de Sergio Lizárraga encabeza la lista con 615 millones de streams acumulados en México entre 2017 y 2021, sin una sola entrada en el chart global durante ese mismo período. Le siguen Danna Paola (309M), Alejandro Fernández (302M), León Larregui (277M) y Carin Leon (266M). La lista está casi completamente dominada por música regional mexicana y artistas de pop mexicano, lo que confirma que México tiene un ecosistema musical propio muy diferente al resto del mundo.
 
 ![Distribución de streams](dashboard/img/04_streams_por_anio.png)
 
-**Viz 4 — Distribución de streams por año en México.** La mediana creció de ~112K en 2017 a ~160K en 2021, lo que significa que el "piso" de streams necesario para entrar al Top 200 aumentó un 43% en 5 años. El Percentil 95 casi se duplicó en el mismo período, reflejando que las canciones más exitosas concentran cada vez más streams.
+**Viz 4 — Distribución de streams por año en México.** La mediana de streams por entrada en el Top 200 creció de ~112K en 2017 a ~160K en 2021, un aumento del 43% en cinco años. El Percentil 95 casi se duplicó en el mismo período. Esto significa que el "piso" mínimo de streams para entrar al chart fue subiendo año con año, lo que refleja tanto el crecimiento de la base de usuarios de Spotify en México como una mayor competencia entre canciones por las posiciones del ranking.
 
 ## Hallazgos
 
-El chart de México muestra una identidad musical claramente diferenciada del chart global durante el período analizado. Mientras el top global está dominado por artistas de pop anglosajón con volúmenes de hasta 13B streams, el top mexicano concentra reggaetón y música regional con máximos de 1.6B. La brecha cultural es más evidente en la viz 3: artistas como Banda MS de Sergio Lizárraga, Danna Paola y Alejandro Fernández acumularon cientos de millones de streams en México sin aparecer nunca en el chart global, lo que sugiere que Spotify México funciona como un ecosistema con preferencias propias donde el contenido en español tiene un peso muy superior al de la agregación global.
+Después de analizar 25 millones de entradas del chart, la conclusión más clara es que **México tiene una identidad musical muy diferente al resto del mundo en Spotify**. El top global está dominado por artistas de pop anglosajón con volúmenes de hasta 13 mil millones de streams, mientras que el top mexicano concentra reggaetón y música regional con máximos de 1.6B. La brecha es todavía más evidente cuando se buscan artistas locales: Banda MS de Sergio Lizárraga acumuló 615 millones de streams en México sin aparecer nunca en el chart global, y lo mismo pasa con Danna Paola, Alejandro Fernández, Cartel de Santa y muchos otros. México no solo escucha diferente — tiene artistas propios que son enormes localmente pero que el algoritmo global nunca captura.
 
-En cuanto al crecimiento, el consumo musical en México creció de forma sostenida entre 2017 y 2021, con un salto particularmente notable en Q1 2020 que coincide con el inicio del confinamiento por la pandemia. La mediana de streams por entrada en el Top 200 aumentó un 43% en cinco años, lo que refleja tanto el crecimiento de la base de usuarios de Spotify en México como una mayor competencia entre canciones por las posiciones del chart.
+En cuanto al crecimiento, el consumo musical en México casi se duplicó entre 2017 y 2021, con un salto especialmente notable durante la pandemia en 2020. La mediana de streams por canción en el Top 200 aumentó un 43% en cinco años, lo que muestra que cada año es más difícil entrar al chart porque la competencia es mayor y los usuarios escuchan más. Todo esto apunta a que Spotify México es un mercado que creció mucho en ese período y que tiene preferencias musicales muy propias que no se diluyen aunque el algoritmo global opere por encima.
 
 ## Estructura del repositorio
 
@@ -156,7 +156,7 @@ En cuanto al crecimiento, el consumo musical en México creció de forma sosteni
 proyecto-final/
 ├── README.md
 ├── datasets/
-│   └── (charts.csv — descargar de Kaggle, ver enlace arriba)
+│   └── charts.csv               ← descargar de Kaggle (3.48 GB, no incluido)
 ├── scripts/
 │   ├── 01_schema_ddl.sql
 │   ├── 02_dim_fecha_populate.sql
