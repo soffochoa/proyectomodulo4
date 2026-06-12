@@ -107,17 +107,7 @@ INSERT INTO dim_chart (chart_key, nombre, descripcion) VALUES
 -- =============================================================================
 -- Ejecutar tras crear el schema para confirmar las 5 tablas:
 --
-   SELECT table_name
-   FROM   information_schema.tables
-   WHERE  table_schema = 'proyecto_spotify'
-   ORDER  BY table_name;
-
-
-SELECT column_name 
-FROM information_schema.columns 
-WHERE table_schema = 'proyecto_spotify' 
-AND table_name = 'dim_fecha'
-ORDER BY ordinal_position;
-
--- Esperado: dim_cancion, dim_chart, dim_fecha, dim_region, fact_chart_entry
--- =============================================================================
+-- SELECT table_name
+-- FROM   information_schema.tables
+-- WHERE  table_schema = 'proyecto_spotify'
+-- ORDER  BY table_name;
