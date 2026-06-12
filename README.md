@@ -48,7 +48,11 @@ Algunas decisiones de diseño que vale la pena documentar:
 
 **dim_fecha con generate_series:** la dimensión de fechas la genero directamente con `generate_series` de PostgreSQL en el rango 2017-2021. No depende del CSV para nada, lo cual hace que ese paso sea reproducible independientemente del estado de los datos.
 
-El diagrama completo del esquema está en `docs/diagrama_modelo.png`. El DDL completo con todas las tablas e índices está en `scripts/01_schema_ddl.sql`.
+El diagrama completo del esquema está en `docs/diagrama_modelo.png`.
+
+![Diagrama del modelo](docs/diagrama_modelo.png)
+
+El DDL completo con todas las tablas e índices está en `scripts/01_schema_ddl.sql`.
 
 ## Infraestructura AWS
 
@@ -154,24 +158,26 @@ En cuanto al crecimiento, el consumo musical en México casi se duplicó entre 2
 
 ```
 proyecto-final/
+├── analisis
+│   └── queries_analiticas.sql
+├── dashboard
+│   ├── img
+│   │   ├── 01_top_artistas.png
+│   │   ├── 02_evolucion_trimestral.png
+│   │   ├── 03_artistas_locales.png
+│   │   ├── 04_streams_por_anio.png
+│   │   └── videostreamlit.mov
+│   ├── visualizaciones_mat.py
+│   └── visualizaciones.py
+├── datasets
+│   └── charts.csv
+├── docs
+│   └── diagrama_modelo.png
 ├── README.md
-├── datasets/
-│   └── charts.csv               ← descargar de Kaggle (3.48 GB, no incluido)
-├── scripts/
-│   ├── 01_schema_ddl.sql
-│   ├── 02_dim_fecha_populate.sql
-│   ├── 03_dim_region_populate.sql
-│   ├── 04_dim_chart_populate.sql
-│   └── etl_pipeline.py
-├── analisis/
-│   └── queries_analiticas.sql
-├── dashboard/
-│   ├── visualizaciones.py
-│   └── img/
-│       ├── 01_top_artistas.png
-│       ├── 02_evolucion_trimestral.png
-│       ├── 03_artistas_locales.png
-│       └── 04_streams_por_anio.png
-└── docs/
-    └── diagrama_modelo.png
+└── scripts
+    ├── 01_schema_ddl.sql
+    ├── 02_dim_fecha_populate.sql
+    ├── 03_dim_region_populate.sql
+    ├── 04_dim_chart_populate.sql
+    └── etl_pipeline.py
 ```
