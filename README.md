@@ -52,7 +52,7 @@ El diagrama completo del esquema está en `docs/diagrama_modelo.png`.
 
 ![Diagrama del modelo](docs/diagrama_modelo.png)
 
-El DDL completo con todas las tablas e índices está en `scripts/01_schema_ddl.sql`.
+
 
 ## Infraestructura AWS
 
